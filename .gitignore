@@ -1,2 +1,6 @@
 *.png
 tags
+tmp
+subtitles
+ml-latest*
+*.log
