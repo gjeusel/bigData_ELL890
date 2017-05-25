@@ -119,6 +119,11 @@ def setup_argparser(): #{{{
                              Many can be specified. Use 3-letter code (ISO-639-3).
                              ''')
 
+    parser.add_argument('--limit_movies', dest='limit_movies', required=False,
+                        action='store', default=None, type=int,
+                        help='''Number maximum of subtitles to download,
+                        downloaded by movieId''')
+
     parser.add_argument('-o', '--outpath', dest='outpath', required=False,
                         action='store', default=default_outpath,
                         help='Folder to save subtitles.')
@@ -146,11 +151,12 @@ def main(argv=None):
         parser.error(str(exc.message))
         raise
 
-    verbose  = args.verbose
-    logfile  = args.logfile
-    filepath = args.filepath
-    outpath  = args.outpath
-    langs    = args.langs
+    verbose      = args.verbose
+    logfile      = args.logfile
+    filepath     = args.filepath
+    outpath      = args.outpath
+    langs        = args.langs
+    limit_movies = args.limit_movies
 
     setup_log(logfile, verbose)
     log.info('{0} {1}'.format(os.path.basename(__file__), locals()))
@@ -174,6 +180,8 @@ def main(argv=None):
             namelist = []
             for row in csv_content:
                 namelist.append(row[1])
+            if limit_movies is not None :
+                namelist = namelist[:limit_movies+1]
     except:
         log.exception('Error occured when reading {}'.format(filepath))
 
@@ -182,10 +190,13 @@ def main(argv=None):
 
     # Creating .mp4 files :
     # CF : https://grouplens.org/datasets/movielens/
-    for e in namelist[:5]:
+    for e in namelist:
         e = e.replace("/","")
         path_mp4 = tmp_path + "/" + e + ".mp4"
         open(path_mp4, 'w').close()
+        print "e = ", e
+
+    print "Found ", len(namelist), " movies subtitles to download ..."
 
     try:
         log.info('Looking for video files in folder {} for {}.'.format(tmp_path, languages))
