@@ -10,68 +10,13 @@ import logging as log
 
 import subliminal
 
+import subprocess
+
 from   babelfish import Language
 from   datetime  import timedelta
 
 import csv
 import shutil
-
-
-# Helpers
-def search_video_files(rootdir, max_age=7, embedded_subs=False): #{{{
-    '''Return a list of video files in rootdir which does not have any subtitle.
-
-    Parameters
-    ----------
-    rootdir: str
-        Root folder path from where to start the search.
-
-    Returns
-    -------
-    list of subliminal.video
-    '''
-    dirpath = unicode(rootdir)
-
-    # data path
-    if not os.path.exists(dirpath):
-        raise IOError('Folder {} not found.'.format(dirpath))
-
-    # scan for videos in the folder and their subtitles
-    videos = subliminal.scan_videos(dirpath)
-
-    return videos
-#}}}
-
-
-def download_subs(videos, languages, dir_to_save="tmp"): #{{{
-    """
-    Will scan for videos newer than one week and try to download
-    subtitles in English for them.
-
-    Parameters
-    ----------
-    videos: list of
-
-    languages: list of babelfish.language
-
-    """
-    nu_vids = []
-    for vid in videos:
-        if len(vid.subtitle_languages) == 0:
-            nu_vids.append(vid)
-
-    # download
-    subs = subliminal.download_best_subtitles(nu_vids, languages)
-
-    log.info('Subs found:')
-    log.info(subs)
-
-    # save
-    log.debug('Saving subtitle files.')
-    for v in videos:
-        subliminal.save_subtitles(v, subs[v], directory=dir_to_save)
-    # subliminal.save_subtitles(subs, single=False)
-#}}}
 
 
 def setup_log(filename='', verbose=False): #{{{
@@ -97,7 +42,6 @@ def setup_log(filename='', verbose=False): #{{{
 
     log.basicConfig(**log_args)
 #}}}
-
 
 def setup_argparser(): #{{{
     """ Define and return the command argument parser. """
@@ -175,6 +119,8 @@ def main(argv=None):
         os.makedirs(outpath)
 
     try:
+        # Creating namelist of films from movies.csv
+        # movies.csv from https://grouplens.org/datasets/movielens/
         with open(filepath, 'r') as csvfile:
             csv_content = csv.reader(csvfile, delimiter=str(","))
             namelist = []
@@ -188,31 +134,33 @@ def main(argv=None):
     # Removing Token name :
     namelist.pop(0)
 
-    # Creating .mp4 files :
-    # CF : https://grouplens.org/datasets/movielens/
+    # Creating pathlist of .mp4 files :
+    pathlist = []
     for e in namelist:
+        # linux path special caracteres :
         e = e.replace("/","")
+
         path_mp4 = tmp_path + "/" + e + ".mp4"
+        pathlist.append(path_mp4)
         open(path_mp4, 'w').close()
-        print "e = ", e
 
     print "Found ", len(namelist), " movies subtitles to download ..."
 
-    try:
-        log.info('Looking for video files in folder {} for {}.'.format(tmp_path, languages))
-        videos = search_video_files(tmp_path)
-    except:
-        log.exception('Error when searching for video files.')
-        raise
-
-    log.info('Videos found:')
-    log.info(videos)
-
-    try:
-        download_subs(videos, languages, dir_to_save=outpath)
-    except:
-        log.exception('Error when downloading subtitles.')
-        raise
+    for f in pathlist:
+        # linux path special caracteres :
+        f_prompt = f
+        f = f.replace(" ","\ ")
+        f = f.replace("(","\(")
+        f = f.replace(")","\)")
+        f = f.replace("'","\\'")
+        command = "subliminal download --language en -d " + outpath + " " + f
+        str_prompt = "Downloading subtitles for : " + os.path.basename(f_prompt) + ' ...'
+        print str_prompt
+        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE)
+        process.wait()
+        if (process.returncode is not 0):
+            print "Subtitles for ", f, " not found, check log for error"
+            log.info(process.returncode)
 
     # Delete tmp directory
     shutil.rmtree(tmp_path, ignore_errors=True)
