@@ -15,9 +15,8 @@ import matplotlib.pyplot as plt
 
 import logging as log
 
-import pandas as pd
-import numpy as np
-
+import nltk # Natural Language ToolKit
+from nltk.corpus import stopwords # Import the stop word list
 
 from pyspark import SparkConf
 from pyspark.sql import SparkSession
@@ -73,6 +72,7 @@ class DataTools:
 
         n_init = self.df_movies.count()
 
+        # Removing registers for which no subtitles were found
         df_movies_without_subs = self.filter_subs_not_found(spark)
         if (df_movies_without_subs.count() is not 0):
             print ("Subtitles were not found for %d/%d movies." %
@@ -125,6 +125,45 @@ class DataTools:
 
         return df_movies_without_subs
 #}}}
+
+    def read_subtitles(spark):
+        """
+        Description : read
+
+        return : list of pyspark.rdd.RDD
+        """
+
+        rdds = []
+        # for element in list of pyspark.sql.types.Row :
+        for e in self.df_movies.select('srt_path').collect():
+            # print(e[0].encode('utf8'))
+            rdds.append(spark.sparkContext.textFile(e[0], use_unicode=True))
+        return(rdds)
+
+
+    def bag_of_words(spark, rdds):
+        nltk.download("stopwords")
+        stopwords_en = stopwords.words('english')
+        stops = set(stopwords_en)
+        for i in range(0, len(rdds)):
+            # Keeping only letters and spaces
+            rdds[i] = rdds[i].map(lambda l: re.sub("[^a-z A-Z]", "", l))
+
+            # Removing spaces at the begining :
+            rdds[i] = rdds[i].map(lambda l: re.sub("^ *", "", l))
+
+            # Removing empty lines :
+            rdds[i] = rdds[i].filter(lambda l: len(l)!=0)
+
+            # Tokenization : convert to lower case and split
+            rdds[i] = rdds[i].map(lambda l: l.lower().split())
+
+            # flatMap to pass from list of list to list of words
+            rdds[i] = rdds[i].flatMap(lambda xs: [x for x in xs])
+
+            # Removing Stop Words (searching in set is much faster) :
+            rdds[i] = rdds[i].filter(lambda l: l not in stops)
+
 
 
 def setup_argparser():
