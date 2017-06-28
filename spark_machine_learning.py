@@ -21,7 +21,6 @@ from nltk.corpus import stopwords # Import the stop word list
 from pyspark import SparkConf
 from pyspark.sql import SparkSession
 
-from pyspark.mllib.stat import Statistics
 from pyspark.sql.functions import *
 
 from pyspark.sql.types import StructType, StructField, IntegerType,\
@@ -43,12 +42,21 @@ class DataTools:
     - n_movies : <int> number of movies considered.
 
     - df_test : pyspark.sql.DataFrame of movies's content subtitles
-                schema = ['movieId', 'text', 'words']
+                schema = ['movieId', 'text', 'words_regex', 'filtered']
 
-    - df_train : pyspark.sql.DataFrame containing
+    - df_train : pyspark.sql.DataFrame containing phrases from resume with
+                 Sentiment note.
+                 The sentiment labels are:
+                    0 - negative
+                    1 - somewhat negative
+                    2 - neutral
+                    3 - somewhat positive
+                    4 - positive
+                 schema = ['PhraseId', 'SentenceId', 'Phrase', Sentiment',
+                           'words_regex', 'filtered']
     """
 
-    def __init__(self, spark, limit_movies=None,
+    def __init__(self, spark, limit_movies=None, limit_training_set=None,
             csv_path = default_csv_dir+"movies.csv",
             srt_dir = default_srt_dir,
             tsv_path = default_tsv_dir+"train.tsv"):
@@ -57,7 +65,7 @@ class DataTools:
 
         self.init_test_set(spark)
 
-        self.init_training_set(spark, tsv_path)
+        self.init_training_set(spark, tsv_path, limit_training_set)
 
 
     def init_movie_set(self, spark, limit_movies, csv_path, srt_dir):
@@ -73,8 +81,24 @@ class DataTools:
         self.n_movies = self.df_movies.count()
 
         if (df_movies_without_subs.count() is not 0):
-            print ("Subtitles were not found for %d/%d movies." %
-                    (df_movies_without_subs.count(), self.n_movies))
+            print ("Subtitles were not found for %d movie(s)." %
+                    df_movies_without_subs.count())
+#}}}
+
+
+    def init_training_set(self, spark, tsv_path, limit_training_set):
+#{{{
+        print("Reading %s ..." % tsv_path)
+        df_tmp =  spark.read.csv(path=tsv_path, sep="\t",
+                header=True, inferSchema=True)
+
+        if(limit_training_set is None):
+            self.df_train = df_tmp
+        else:
+            self.df_train = df_tmp.limit(limit_training_set)
+
+        print("Applying bag_of_words to df_train ...")
+        self.df_train = bag_of_words(df=self.df_train)
 #}}}
 
 
@@ -84,19 +108,39 @@ class DataTools:
         self.df_test = read_subtitles(spark, self.df_movies)
 
         print("Applying bag_of_words to df_test ...")
-        self.df_test = bag_of_words(self.df_test, nameInputCol="Phrase")
+        self.df_test = bag_of_words(df=self.df_test)
 #}}}
 
 
-    def init_training_set(self, spark, tsv_path):
-#{{{
-        print("Reading %s ..." % tsv_path)
-        self.df_train = spark.read.csv(path=tsv_path, sep="\t",
-                header=True, inferSchema=True)
+    def perform_countVec(self):
+        print('Fitting CountVectorizer model ...')
+        model = fit_countVec(self.df_train, self.df_test)
 
-        print("Applying bag_of_words to df_train ...")
-        self.df_train = bag_of_words(df=self.df_train, nameInputCol="Phrase")
-#}}}
+        print('Transforming train and test sets ...')
+        self.df_train = model.transform(self.df_train)
+        self.df_test = model.transform(self.df_test)
+
+
+    def classification(self, **kwargs):
+        from pyspark.ml.classification import LogisticRegression
+        lr = LogisticRegression(featuresCol='features',
+                labelCol='Sentiment', predictionCol='Sentiment_Predicted',
+                **kwargs)
+
+        print('Fitting LogisticRegression model ...')
+        lrModel = lr.fit(self.df_train)
+
+        print('Testing ...')
+        self.df_test = lrModel.transform(self.df_test)
+
+        return lrModel
+
+    # def construct_df_results(self):
+    #     # reduce on movieId and concat lines of subtitles to make only 1 string:
+    #     from pyspark.sql.functions import sum
+    #     # df_tmp =
+    #     self.df_test = df_test.groupBy('movieId').agg(
+    #             concat_ws(' ', collect_list('text')).alias('text'))
 
 
 # Functions for df_movies and df_test construction :
@@ -203,7 +247,7 @@ def read_subtitles(spark, df_movies):
 
 #}}}
 
-def bag_of_words(df, nameInputCol):
+def bag_of_words(df, nameInputCol="Phrase"):
     """
     Description :
     - RegexTokenizer : tokenizer according a regex
@@ -232,6 +276,15 @@ def bag_of_words(df, nameInputCol):
 
 #}}}
 
+def fit_countVec(df_train, df_test, nameInputCol="filtered"):
+    df_tmp = df_train.select(nameInputCol).union(
+            df_test.select(nameInputCol))
+
+    from pyspark.ml.feature import CountVectorizer
+    CV = CountVectorizer(inputCol=nameInputCol, outputCol='features')
+    model = CV.fit(df_tmp)
+
+    return(model)
 
 
 def setup_argparser():
@@ -255,6 +308,12 @@ def setup_argparser():
                         action='store', default=None, type=int,
                         help='''Number maximum of subtitles to download,
                         downloaded by movieId''')
+
+    parser.add_argument('--limit_training_set', dest='limit_training_set',
+                        required=False,
+                        action='store', default=None, type=int,
+                        help='''Number maximum of features to use in the
+                        training set''')
 
     parser.add_argument('--log', dest='logfile', required=False,
                         action='store', default="ML_spark.log",
@@ -285,6 +344,7 @@ def main(argv=None):
     csv_dir = args.csv_dir
     srt_dir  = args.srt_dir
     limit_movies = args.limit_movies
+    limit_training_set = args.limit_training_set
 
 
     spark = SparkSession.builder \
@@ -292,18 +352,27 @@ def main(argv=None):
     .getOrCreate()
 
     # Constructor :
-    dfs = DataTools(spark, limit_movies)
+    dfs = DataTools(spark, limit_movies, limit_training_set)
     # dfs.df_movies.printSchema()
     # dfs.df_movies.show()
-    print('Continuing with df_movies.count() = %d ...' % dfs.df_movies.count())
+    print('Continuing with %d movies ...' % dfs.df_movies.count())
 
     # Sentiment Analysis :
     print('------------ Sentiment Analysis -----------')
-    print('Training set : ')
-    dfs.df_test.show()
+    # dfs.perform_countVec()
+    # model = fit_countVec(dfs.df_train, dfs.df_test)
+    df_tmp = dfs.df_train.select('filtered').union(
+            dfs.df_test.select('filtered'))
 
+    from pyspark.ml.feature import CountVectorizer
+    CV = CountVectorizer(inputCol='filtered', outputCol='features')
+    model = CV.fit(df_tmp)
     print('Testing set : ')
-    # dfs.df_train.show()
+    dfs.df_train.show(5)
+    print('Training set : ')
+    dfs.df_test.show(5)
+
+    # lrModel = dfs.classification()
 
 
 
