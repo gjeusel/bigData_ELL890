@@ -52,7 +52,13 @@ patt = "[^a-zA-Z']"
 regexTokenizer = RegexTokenizer(inputCol='text',
         outputCol='words_regex', pattern=patt)
 df_content = regexTokenizer.transform(df_content)
-df_content = df_content.dropDuplicates(['words_regex'])
+
+from pyspark.ml.feature import StopWordsRemover
+remover = StopWordsRemover(inputCol="words_regex",
+        outputCol="filtered")
+df_content = remover.transform(df_content)
+
+df_content = df_content.dropDuplicates(['filtered'])
 
 
 
