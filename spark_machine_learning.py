@@ -38,30 +38,26 @@ class DataTools:
     """
     - df_movies : pyspark.sql.DataFrame of movies.csv
                 schema = ['movieId', 'title', 'genres', 'srt_path']
+
+    - n_movies : <int> number of movies considered.
+
+    - df_content : pyspark.sql.DataFrame of movies's content subtitles
+                schema = ['movieId', 'text', 'words']
     """
 
 
     def __init__(self, spark, limit_movies=None,
             csv_path=default_csv_dir+"movies.csv",
             srt_dir=default_srt_dir):
-#{{{
         """
         Description : constructor
-            - Read csv file
+            - Read csv file movies.csv
             - Filter rows if more than limit_movies
             - Filter rows for which srt file not found
                 convention used : srt_path = srt_dir + 'title' + '.en.srt'
         """
-
+#{{{
         print("Reading %s ..." % csv_path)
-        # The datatype can be inferred, which means deduced during the process of
-        # reading. But if multi-TB+ data, better provide an explicit pre-defined
-        # schema manually :
-        # df_movies_schema = StructType([
-        #     StructField('movieId', IntegerType(), True),
-        #     StructField('title', StringType(), True),
-        #     StructField('genres', StringType(), True)])
-
         df_tmp = spark.read.csv(csv_path, header=True,
                 inferSchema=True) #schema=df_movies_schema)
 
@@ -70,27 +66,28 @@ class DataTools:
         else:
             self.df_movies = df_tmp.limit(limit_movies)
 
-        n_init = self.df_movies.count()
+        self.n_movies = self.df_movies.count()
 
         # Removing registers for which no subtitles were found
+        print("Removing registers for which no subtitles were found ...")
         df_movies_without_subs = self.filter_subs_not_found(spark)
+
         if (df_movies_without_subs.count() is not 0):
             print ("Subtitles were not found for %d/%d movies." %
-                    (df_movies_without_subs.count(), n_init))
-            # df_movies_without_subs.show()
+                    (df_movies_without_subs.count(), self.n_movies))
 #}}}
 
 
     def filter_subs_not_found(self, spark, srt_dir=default_srt_dir):
-#{{{
         """
         Description : filter df_movies dataframe from movies which subtitles
                 were not found in srt_dir.
 
-        return : pyspark.sql.dataframe.DataFrame of movies which subtitles
-                were not found.
+        return :
+        - df_movies_without_subs : DataFrame containing only movies for
+                      which subtitles were not found.
         """
-
+#{{{
         # Adding srt_path column that is a function of 'title' :
         self.df_movies = self.df_movies.withColumn(
                 colName="srt_path",
@@ -126,43 +123,73 @@ class DataTools:
         return df_movies_without_subs
 #}}}
 
-    def read_subtitles(spark):
+
+    def init_df_content(self, spark):
         """
-        Description : read
+        Description :
+        - read all srt files and stores them into a rdd
+        - convert this rdd to DataFrame
+        - adjust datas by reducing on movieId
 
-        return : list of pyspark.rdd.RDD
+        Infos :
+        - To read a whole directory use :
+            SparkContext.wholeTextFiles lets you read a directory containing
+            multiple small text files, and returns each of them as
+            (filename, content) pairs.
+
+        return : df_content (pyspark.sql.DataFrame)
         """
+#{{{
+        # Generate rdd by reading subtitles :
+        fullRDD = spark.sparkContext.emptyRDD()
+        for i, e in self.df_movies.select('movieId', 'srt_path').collect():
+            rdd_tmp = spark.sparkContext.textFile(e, use_unicode=True)
+            fullRDD = fullRDD.union(rdd_tmp.map(lambda x: [i, x]))
 
-        rdds = []
-        # for element in list of pyspark.sql.types.Row :
-        for e in self.df_movies.select('srt_path').collect():
-            # print(e[0].encode('utf8'))
-            rdds.append(spark.sparkContext.textFile(e[0], use_unicode=True))
-        return(rdds)
+        # Converting rdd to DF :
+        schem = StructType( [
+            StructField('movieId', IntegerType(), True),
+            StructField('text', StringType(), True)
+        ] )
+        self.df_content = fullRDD.toDF(schema=schem)
+
+        # # reduce on movieId and concat lines of subtitles to make only 1 string:
+        # from pyspark.sql.functions import concat_ws
+        # self.df_content = self.df_content.groupBy('movieId').agg(
+        #         concat_ws(' ', collect_list('text')).alias('text'))
+#}}}
 
 
-    def bag_of_words(spark, rdds):
-        nltk.download("stopwords")
-        stopwords_en = stopwords.words('english')
-        stops = set(stopwords_en)
-        for i in range(0, len(rdds)):
-            # Keeping only letters and spaces
-            rdds[i] = rdds[i].map(lambda l: re.sub("[^a-z A-Z]", "", l))
+    def bag_of_words(self):
+        """
+        Description :
+        - RegexTokenizer : tokenizer according a regex
+        - remove duplicates in words_regex to delete empty token
+        - remove stopwords
 
-            # Removing spaces at the begining :
-            rdds[i] = rdds[i].map(lambda l: re.sub("^ *", "", l))
+        """
+#{{{
+        from pyspark.ml.feature import RegexTokenizer
 
-            # Removing empty lines :
-            rdds[i] = rdds[i].filter(lambda l: len(l)!=0)
+        patt = "[^a-zA-Z']"
+        regexTokenizer = RegexTokenizer(inputCol='text',
+                outputCol='words_regex', pattern=patt)
+        self.df_content = regexTokenizer.transform(self.df_content)
 
-            # Tokenization : convert to lower case and split
-            rdds[i] = rdds[i].map(lambda l: l.lower().split())
+        # remove doubles :
+        self.df_content = self.df_content.dropDuplicates(['words_regex'])
 
-            # flatMap to pass from list of list to list of words
-            rdds[i] = rdds[i].flatMap(lambda xs: [x for x in xs])
+        # remove stopwords :
+        from pyspark.ml.feature import StopWordsRemover
+        remover = StopWordsRemover(inputCol="words_regex",
+                outputCol="filtered")
+        self.df_content = remover.transform(self.df_content)
+#}}}
 
-            # Removing Stop Words (searching in set is much faster) :
-            rdds[i] = rdds[i].filter(lambda l: l not in stops)
+    # def words_to_values(self):
+
+
+
 
 
 
@@ -227,8 +254,19 @@ def main(argv=None):
     dfs = DataTools(spark, limit_movies)
     dfs.df_movies.printSchema()
     dfs.df_movies.show()
-    print('Continuing with df_movies.count() = %d ...' % dfs.df_movies.count())
+    print('Continuing with df_mo)vies.count() = %d ...' % dfs.df_movies.count())
     dfs.df_movies.cache()
+
+    # Sentiment Analysis :
+    print('Reading srt files ...')
+    dfs.init_df_content(spark)
+
+    print('Applying bag_of_words ...')
+    dfs.bag_of_words()
+
+    dfs.df_content.show()
+
+
 
 
 
