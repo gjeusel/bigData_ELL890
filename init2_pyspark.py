@@ -1,22 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-from __future__ import print_function
-
 import sys, os, re
-reload(sys)
-sys.setdefaultencoding('utf8') # problem with encoding
-
-import argparse
-
-import matplotlib
-matplotlib.use("Qt4Agg") # enable plt.show() to display
-import matplotlib.pyplot as plt
-
-import logging as log
-
-import nltk # Natural Language ToolKit
-from nltk.corpus import stopwords # Import the stop word list
 
 from pyspark import SparkConf
 from pyspark.sql import SparkSession
@@ -26,9 +8,8 @@ from pyspark.sql.functions import *
 from pyspark.sql.types import StructType, StructField, IntegerType,\
     StringType, BooleanType
 
-
 # Global variables :
-script_path = os.path.abspath(sys.argv[0])
+script_path = "/home/gjeusel/projects/bigData_ELL890"
 default_tsv_dir = os.path.dirname(script_path)+"/ml-training/"
 default_csv_dir = os.path.dirname(script_path)+"/ml-latest-small/"
 default_srt_dir  = os.path.dirname(script_path)+"/subtitles/"
@@ -122,12 +103,6 @@ class DataTools:
 
 
     def classification(self, **kwargs):
-        """
-        Description :
-        - fit the LogisticRegression model with the training set
-        - predict values for the testing set
-        - format a nice df_results
-        """
         from pyspark.ml.classification import LogisticRegression
         lr = LogisticRegression(featuresCol='features',
                 labelCol='Sentiment', predictionCol='Sentiment_Predicted',
@@ -313,11 +288,6 @@ def bag_of_words(df, nameInputCol="Phrase"):
 #}}}
 
 def fit_countVec(df_train, df_test, nameInputCol="filtered"):
-    """
-    Description :
-    - union between df_train and df_test for the filtered column
-    - fit the CountVectorizer model with all the words included
-    """
     df_tmp = df_train.select(nameInputCol).union(
             df_test.select(nameInputCol))
 
@@ -327,96 +297,27 @@ def fit_countVec(df_train, df_test, nameInputCol="filtered"):
 
     return(model)
 
+# Constructor :
+dfs = DataTools(spark, limit_movies=5,
+        csv_path="ml-latest-small/movies.csv",
+        srt_dir="subtitles/",
+        tsv_path="ml-training/train.tsv")
 
-def setup_argparser():
-#{{{
-    """ Define and return the command argument parser. """
-    parser = argparse.ArgumentParser(description=''' Spark Machine Learning
-                                     -- Big Data.''')
+# dfs.df_movies.printSchema()
+# dfs.df_movies.show()
+print('Continuing with df_movies.count() = %d ...' % dfs.df_movies.count())
 
-    parser.add_argument('--csv_dir', dest='csv_dir', required=False,
-                        default=default_csv_dir, action='store',
-                        help='''Path to directory that contains csv files.
-                        ''')
+# Sentiment Analysis :
+print('------------ Sentiment Analysis -----------')
+dfs.perform_countVec()
+print('Testing set : ')
+dfs.df_train.show(5)
+print('Training set : ')
+dfs.df_test.show(5)
 
-    parser.add_argument('--srt_dir', dest='srt_dir', required=False,
-                        action='store', default=default_srt_dir,
-                        help='''Path to directory thaht contains subtitles
-                        files.
-                             ''')
-
-    parser.add_argument('--limit_movies', dest='limit_movies', required=False,
-                        action='store', default=None, type=int,
-                        help='''Number maximum of subtitles to download,
-                        downloaded by movieId''')
-
-    parser.add_argument('--limit_training_set', dest='limit_training_set',
-                        required=False,
-                        action='store', default=None, type=int,
-                        help='''Number maximum of features to use in the
-                        training set''')
-
-    parser.add_argument('--log', dest='logfile', required=False,
-                        action='store', default="ML_spark.log",
-                        help='Log file path.')
-
-    parser.add_argument('-v', '--verbose', dest='verbose', required=False,
-                        default=0, type=int,
-                        help='Verbose level: 0 for errors, 1 for info or 2 for debug.')
-
-    return parser
-#}}}
+lrModel = dfs.classification()
+dfs.df_results.show(truncate=False)
 
 
-def main(argv=None):
-
-    parser = setup_argparser()
-
-    try:
-        args = parser.parse_args()
-
-    except argparse.ArgumentError as exc:
-        log.exception('Error parsing options.')
-        parser.error(str(exc.message))
-        raise
-
-    verbose  = args.verbose
-    logfile  = args.logfile
-    csv_dir = args.csv_dir
-    srt_dir  = args.srt_dir
-    limit_movies = args.limit_movies
-    limit_training_set = args.limit_training_set
 
 
-    spark = SparkSession.builder \
-    .appName("Python Spark Big Data Machine Learning") \
-    .getOrCreate()
-
-    # Constructor :
-    dfs = DataTools(spark, limit_movies, limit_training_set)
-    # dfs.df_movies.printSchema()
-    # dfs.df_movies.show()
-    print('Continuing with %d movies ...' % dfs.df_movies.count())
-
-    # Sentiment Analysis :
-    print('------------ Sentiment Analysis -----------')
-
-    limit_training_set = None # BUG if not set to None, make no sense !!!!!
-    dfs.perform_countVec()
-    print('Testing set : ')
-    dfs.df_train.show(5)
-    print('Training set : ')
-    dfs.df_test.show(5)
-
-    lrModel = dfs.classification()
-    dfs.df_results.show(truncate=False)
-
-    model_path = os.path.dirname(script_path)+'lr_model_test_'+str(limit_movies)+\
-                '_train_'+str(dfs.df_train.count())
-    lrModel.save(model_path)
-
-
-    spark.stop()
-
-if __name__ == "__main__":
-    sys.exit(main())
